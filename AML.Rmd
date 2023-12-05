@@ -1,0 +1,377 @@
+---
+title: "AML_Pipeline"
+author: "Krish Shah"
+date: "2023-10-20"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+Import necessary packages and clear environment.
+```{r}
+rm(list=ls())
+suppressPackageStartupMessages(require(tidymodels))
+suppressPackageStartupMessages(require(tidyverse))
+suppressPackageStartupMessages(require(workflows))
+suppressPackageStartupMessages(require(tune))
+suppressPackageStartupMessages(require(themis))
+suppressPackageStartupMessages(require(vip))
+suppressPackageStartupMessages(require(glue))
+suppressPackageStartupMessages(require(eulerr))
+suppressPackageStartupMessages(require(BiocParallel))
+suppressPackageStartupMessages(require(RVenn))
+suppressPackageStartupMessages(require(ggplot2))
+suppressPackageStartupMessages(require(ggpubr))
+suppressPackageStartupMessages(require(ComplexHeatmap))
+suppressPackageStartupMessages(require(circlize))
+suppressPackageStartupMessages(require(RColorBrewer))
+suppressPackageStartupMessages(require(DESeq2))
+suppressPackageStartupMessages(require(GGally))
+suppressPackageStartupMessages(require(ranger))
+suppressPackageStartupMessages(require(logger))
+suppressPackageStartupMessages(require(crayon))
+suppressPackageStartupMessages(require(tibble))
+suppressPackageStartupMessages(require(glue))
+suppressPackageStartupMessages(require(doFuture))
+suppressPackageStartupMessages(require(parallel))
+suppressPackageStartupMessages(require(skimr))
+suppressPackageStartupMessages(require(limma))
+suppressPackageStartupMessages(require(preprocessCore))
+suppressPackageStartupMessages(require(patchwork))
+suppressPackageStartupMessages(require(xgboost))
+suppressPackageStartupMessages(require(kernlab))
+suppressPackageStartupMessages(require(caret))
+```
+
+Source machine learning functions from utils.R
+```{r}
+source("/Users/krishshah/Downloads/R markdown transfer files/utils.R")
+```
+
+Parallel computing for cores. Do not run on local R Studio.
+```{r}
+#options(future.globals.maxSize= 10 * 2^1024)
+#n = Sys.getenv('LSB_MAX_NUM_PROCESSORS')
+#all_cores <- as.numeric(n)
+
+#registerDoFuture()
+#cl <- makeCluster(all_cores)
+#plan(future::cluster, workers = cl)
+```
+
+Load SJ + TARGET TPM data.
+```{r}
+TPM <- read.table("/Users/krishshah/Downloads/R markdown transfer files/SJAML842_TPM.txt",row.names = 1)
+row_names = TPM$geneID
+TPM = TPM[,-c(1:4)]
+TPM = data.matrix(TPM)
+rownames(TPM) = row_names
+```
+
+Load SJ + TARGET count data.
+```{r}
+count <- read.table("/Users/krishshah/Downloads/R markdown transfer files/SJAML842_count.txt")
+counts_mat = data.matrix(count[,-1])
+rownames(counts_mat) = count$geneID
+rows = rownames(counts_mat) 
+counts_mat = counts_mat[,-c(1:3)]
+```
+
+Load SJ + TARGET meta data.
+```{r}
+meta <- readr::read_tsv("/Users/krishshah/Downloads/R markdown transfer files/AML_n856_coreReferenceSetcases_update.txt", show_col_types = FALSE)
+subset_meta <- subset(meta, Sample %in% colnames(TPM))
+meta = subset_meta
+```
+
+Make sure meta lines up with count and TPM data + table on Source and Libstrand.
+```{r}
+all(colnames(TPM)==meta$Sample)
+all(colnames(counts_mat)==meta$Sample)
+table(meta$Source, meta$LibStrand)
+```
+
+Load AAML1031 count data.
+```{r}
+test1 = readr::read_tsv("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AAML1031_n1034Dx-Batch01-STRANDED_RSEM_gene_count.2023-03-22_00-02-47.txt")
+test2 = readr::read_tsv("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AAML1031_n1034Dx-Batch02-STRANDED_RSEM_gene_count.2023-03-22_22-14-18.txt")
+```
+
+Combine both count files.
+```{r}
+AAML_data = cbind(test1, test2)
+row_names = AAML_data$geneID
+AAML_data = AAML_data[,-c(1:4)]
+rownames(AAML_data) = row_names
+```
+
+Load in AAML1031 meta.
+```{r}
+AAML_meta = readxl::read_xlsx("/Users/krishshah/Downloads/R markdown transfer files/AAML1031_lcd5000_prediction.xlsx")
+AAML_meta_simplified = data.frame(Sample = AAML_meta$ID, MolClass = AAML_meta$MolClass, LibStrand = "Stranded")
+```
+
+Load in AAML1031 TPM and match with meta file.
+```{r}
+TPM1 = read.table("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AAML1031_n1034Dx-Batch01-STRANDED_RSEM_gene_TPM.2023-03-22_00-02-47.txt", row.names = 1)
+TPM1 = TPM1[,-c(1:3)]
+colnames(TPM1) = TPM1[1,]
+TPM1 = TPM1[-1,]
+TPM2 = read.table("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AAML1031_n1034Dx-Batch02-STRANDED_RSEM_gene_TPM.2023-03-22_22-14-18.txt", row.names = 1)
+TPM2 = TPM2[,-c(1:3)]
+colnames(TPM2) = TPM2[1,]
+TPM2 = TPM2[-1,]
+a_TPM = cbind(TPM1,TPM2)
+AAML_TPM = a_TPM[,AAML_meta$ID]
+```
+
+AAML1031 meta file has 1034 samples while count has 1038 so need to match up.
+```{r}
+AAML_data = AAML_data[,AAML_meta$ID]
+all(colnames(AAML_data)==AAML_meta$ID)
+all(colnames(AAML_TPM)==AAML_meta$ID)
+```
+
+Load AML17 TPM data.
+```{r}
+AML17_TPM <- read.table("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AML_Remapped_hg38-STRANDED_RSEM_gene_TPM.2023-03-11_07-49-42.txt",row.names = 1)
+AML17_TPM = AML17_TPM[-c(1:3)]
+colnames(AML17_TPM) = AML17_TPM[1,]
+AML17_TPM = AML17_TPM[-1,]
+
+extra_TPM <- read.table("/Users/krishshah/Downloads/R markdown transfer files/SJAML031413_D1_TPM.txt")
+extra_TPM = extra_TPM[,-c(2:4)] %>% as_tibble()
+colnames(extra_TPM) = extra_TPM[1,]
+extra_TPM = extra_TPM[-1,]
+row_names = extra_TPM$geneID
+extra_TPM = extra_TPM[,-1]
+rownames(extra_TPM) = row_names
+
+TPM_17 = cbind(AML17_TPM,extra_TPM)
+
+row_names = colnames(TPM_17)
+```
+
+Only keep samples that are not in SJ+TARGET data or AAML1031 data.
+```{r}
+`%notin%` <- function(x, y) {
+  !(x %in% y)
+}
+
+TPM_17 = t(TPM_17) %>% data.frame()
+rownames(TPM_17) = row_names
+TPM_17a = filter(TPM_17, rownames(TPM_17) %notin% meta$Sample)
+TPM_17a = filter(TPM_17a, rownames(TPM_17a) %notin% AAML_meta$ID)
+```
+
+Load in AML17 count data.
+```{r}
+AML16_counts = read.table("/Users/krishshah/Downloads/R markdown transfer files/KLCO-AML_Remapped_hg38-STRANDED_RSEM_gene_count.2023-03-11_07-49-42.txt")
+AML16_counts = AML16_counts[,-c(2:4)]
+colnames(AML16_counts) = AML16_counts[1,]
+AML16_counts = AML16_counts[-1,]
+row_names = AML16_counts$geneID
+AML16_counts = AML16_counts[,-1]
+rownames(AML16_counts) = row_names
+row_names = colnames(AML16_counts)
+AML16_counts = t(AML16_counts) %>% as_tibble()
+rownames(AML16_counts) = row_names
+extra_count = read.table("/Users/krishshah/Downloads/R markdown transfer files/SJAML031413_D1.RSEM.genes.counts")
+extra_count = extra_count[,-c(2:4)]
+extra_count = extra_count[,-c(3:4)]
+extra_count = t(extra_count) %>% as_tibble()
+extra_count = extra_count[,-1]
+colnames(extra_count) = extra_count[1,]
+extra_count=extra_count[-1,]
+rownames(extra_count) = "SJAML031413_D1"
+AML16_countse = rbind(AML16_counts, extra_count)
+```
+
+Filter AML17 count data to not include data from SJ, TARGET, or AAML.
+```{r}
+AML_17c = filter(AML16_countse, rownames(AML16_countse) %notin% meta$Sample)
+AML_17c = filter(AML_17c, rownames(AML_17c) %notin% AAML_meta$ID)
+all(rownames(AML_17c)==rownames(TPM_17a))
+```
+
+Parse through and create SJ meta, SJ TPM, and SJ count.
+```{r}
+SJ_meta <- meta[meta$Source == "SJ",]
+SJ_counts_mat = counts_mat[,SJ_meta$Sample]
+SJ_TPM = TPM[,SJ_meta$Sample]
+```
+
+Parse through and create TARGET meta, TARGET TPM, and TPM count.
+```{r}
+TARGET_meta <- meta[meta$Source == "TARGET",]
+TARGET_counts = counts_mat[, TARGET_meta$Sample]
+TARGET_TPM = TPM[,TARGET_meta$Sample]
+```
+
+Check dimensions of count + meta data.
+```{r}
+dim(SJ_counts_mat)
+dim(TARGET_counts)
+dim(AAML_data)
+dim(AML_17c)
+dim(SJ_meta)
+dim(TARGET_meta)
+dim(AAML_meta)
+```
+
+Make sure each file is samples x genes and in tibble structure.
+```{r}
+SJ_counts = t(SJ_counts_mat) %>% as_tibble()
+TARGET_counts = t(TARGET_counts) %>% as_tibble()
+AAML_data = t(AAML_data) %>% as_tibble()
+```
+
+Create simplified meta files for each source data to merge for PCA.
+```{r}
+SJ_meta_simple = data.frame(Sample = SJ_meta$Sample,
+                            Subtype = SJ_meta$MolClass,
+                            LibraryPrep = SJ_meta$LibStrand,
+                            Source = "SJ")
+TARGET_meta_simple = data.frame(Sample = TARGET_meta$Sample,
+                                Subtype = TARGET_meta$MolClass,
+                                LibraryPrep = TARGET_meta$LibStrand,
+                                Source = "TARGET")
+AAML_meta_simple = data.frame(Sample = AAML_meta$ID,
+                              Subtype = AAML_meta$MolClass,
+                              LibraryPrep = "Stranded",
+                              Source = "AAML1031")
+AML17_meta = data.frame(Sample = rownames(AML_17c),
+                        Subtype = "Unknown",
+                        LibraryPrep = "Stranded",
+                        Source = "AML17")
+```
+
+Merge count files and meta files and check dimensions.
+```{r}
+all_4_counts = rbind(SJ_counts, TARGET_counts, AAML_data, AML_17c)
+all_4_meta = rbind(SJ_meta_simple, TARGET_meta_simple, AAML_meta_simple, AML17_meta)
+dim(all_4_counts)
+dim(all_4_meta)
+```
+
+Only take the 20,004 protein coding genes from the dataframe.
+```{r}
+geneInfo = readr::read_tsv("/Users/krishshah/Downloads/R markdown transfer files/MP2PRT_used_count.txt")[,1:4]
+
+geneInfo_filtered <- geneInfo %>% 
+  filter(geneID %in% names(all_4_counts))
+
+# Filter columns of train_x based on geneInfo$type
+all_4_counts_protein <- all_4_counts %>%
+  select(geneInfo_filtered$geneID[geneInfo_filtered$bioType == "protein_coding"]) %>% data.matrix()
+```
+
+Create PCA df.
+```{r}
+pca_data = prcomp((log10(all_4_counts_protein+0.001)),retx = T,scale. = T,center = T)
+
+percentVar <- pca_data$sdev^2 / sum(pca_data$sdev^2)
+
+pca.df = cbind(pca_data$x[,1:15], all_4_meta) %>% as_tibble()
+```
+
+Plot by Source.
+```{r}
+p1 = ggplot(pca.df, aes(x = PC1,y=PC2, color = Source))+ 
+  geom_point(size=1.5) + 
+  geom_vline(xintercept = 50, linetype = "dashed", color = "red") +
+  xlab(paste0("PC1: ",round(percentVar[1] * 100,digits = 2),"% variance")) +
+  ylab(paste0("PC2: ",round(percentVar[2] * 100,digits = 2),"% variance")) +
+  #ggrepel::geom_text_repel(force=4,size=3,show.legend = F) +
+  theme_bw() + 
+  ggsci::scale_color_d3() +
+  ggtitle("Count-based PCA",subtitle = "20004 Protein Coding Genes") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        plot.subtitle = element_text(hjust = 0.5,size = 8))
+
+p1
+```
+
+Plot by Library prep protocol.
+```{r}
+p2 = ggplot(pca.df, aes(x = PC1,y=PC2, color = LibraryPrep))+ 
+  geom_point(size=1.5) + 
+  geom_vline(xintercept = 50, linetype = "dashed", color = "red") +
+  xlab(paste0("PC1: ",round(percentVar[1] * 100,digits = 2),"% variance")) +
+  ylab(paste0("PC2: ",round(percentVar[2] * 100,digits = 2),"% variance")) +
+  #ggrepel::geom_text_repel(force=4,size=3,show.legend = F) +
+  theme_bw() + 
+  ggsci::scale_color_d3() +
+  ggtitle("Count-based PCA",subtitle = "20004 Protein Coding Genes") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        plot.subtitle = element_text(hjust = 0.5,size = 8))
+
+p2
+```
+
+Check dimensions of TPM data so that we can do the same process.
+```{r}
+dim(TPM_17a)
+dim(SJ_TPM)
+dim(TARGET_TPM)
+dim(AAML_TPM)
+```
+
+Combine TPM data in same order as meta file above.
+```{r}
+TPM_17 = t(TPM_17a) %>% as_tibble()
+all_4_TPM = t(cbind(SJ_TPM, TARGET_TPM, AAML_TPM, TPM_17)) %>% as_tibble()
+```
+
+Only choose protein-coding genes.
+```{r}
+geneInfo = readr::read_tsv("/Users/krishshah/Downloads/R markdown transfer files/MP2PRT_used_count.txt")[,1:4]
+
+geneInfo_filtered <- geneInfo %>% 
+  filter(geneID %in% names(all_4_TPM))
+
+# Filter columns of train_x based on geneInfo$type
+all_4_TPM_protein <- all_4_TPM %>%
+  select(geneInfo_filtered$geneID[geneInfo_filtered$bioType == "protein_coding"]) %>% data.matrix()
+```
+
+Create PCA df using TPM input.
+```{r}
+pca_data = prcomp((log10(all_4_TPM_protein+0.001)),retx = T,scale. = T,center = T)
+
+percentVar <- pca_data$sdev^2 / sum(pca_data$sdev^2)
+
+pca.df = cbind(pca_data$x[,1:15], all_4_meta) %>% as_tibble()
+```
+
+Plot by Source.
+```{r}
+p1 = ggplot(pca.df, aes(x = PC1,y=PC2, color = Source))+ 
+  geom_point(size=1.5) + 
+  xlab(paste0("PC1: ",round(percentVar[1] * 100,digits = 2),"% variance")) +
+  ylab(paste0("PC2: ",round(percentVar[2] * 100,digits = 2),"% variance")) +
+  #ggrepel::geom_text_repel(force=4,size=3,show.legend = F) +
+  theme_bw() + 
+  ggsci::scale_color_d3() +
+  ggtitle("TPM-based PCA",subtitle = "20004 Protein Coding Genes") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        plot.subtitle = element_text(hjust = 0.5,size = 8))
+
+p1
+```
+
+Plot by Library prep protocol.
+```{r}
+p2 = ggplot(pca.df, aes(x = PC1,y=PC2, color = LibraryPrep))+ 
+  geom_point(size=1.5) + 
+  xlab(paste0("PC1: ",round(percentVar[1] * 100,digits = 2),"% variance")) +
+  ylab(paste0("PC2: ",round(percentVar[2] * 100,digits = 2),"% variance")) +
+  #ggrepel::geom_text_repel(force=4,size=3,show.legend = F) +
+  theme_bw() + 
+  ggsci::scale_color_d3() +
+  ggtitle("TPM-based PCA",subtitle = "20004 Protein Coding Genes") +
+  theme(plot.title = element_text(hjust = 0.5,size = 10),
+        plot.subtitle = element_text(hjust = 0.5,size = 8))
+
+p2
+```
